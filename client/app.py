@@ -12,7 +12,7 @@ with open("config.json", "r") as f:
 def send_activity(data):
     host = config.get("host")
     port = config.get("port")
-    path = "/api/v1/activities/"
+    path = "/api/v1/activity/"
     json_data = json.dumps(data)
     headers = (
         f"POST {path} HTTP/1.1\r\n"

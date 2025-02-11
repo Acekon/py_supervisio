@@ -1,57 +1,48 @@
 import os
 import logging
 
+import sqlalchemy
 import uvicorn as uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException, Query
 from starlette.responses import Response
-from pydantic import BaseModel
 from dotenv import load_dotenv
-from db import save_activity, get_activity_user_sid, get_activity_user_ip, get_activity_sys_name
+from typing import Annotated
+from fastapi import Depends
+from sqlmodel import SQLModel, Field, Session, create_engine, select
+
+
+class Activity(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    timestamp: float = Field(index=True)
+    user_sid: str = Field(index=True)
+    user_ip: str = Field(index=True)
+    user_name: str = Field(index=True)
+    user_display_name: str = Field(index=True)
+    sys_name: str = Field(index=True)
+    sys_version: str = Field()
+
 
 load_dotenv()
 app = FastAPI()
+
+sqlite_file_name = "users_dev.db"
+sqlite_url = f"sqlite:///{sqlite_file_name}"
+
+
+def get_session():
+    with Session(engine) as session:
+        yield session
+
 
 ALLOWED_IP = os.environ.get("allowed_ip").split(',')
 
 logging.basicConfig(filename="app.log", level=logging.INFO, format="%(asctime)s %(message)s")
 logging.basicConfig(filename="app.log", level=logging.ERROR, format="%(asctime)s %(message)s")
 
+connect_args = {"check_same_thread": False}
+engine = create_engine(sqlite_url, connect_args=connect_args)
 
-class Activity(BaseModel):
-    timestamp: float
-    user_sid: str
-    user_ip: str
-    user_name: str
-    user_display_name: str
-    sys_name: str
-    sys_version: str
-
-    def save(self):
-        return save_activity(
-            timestamp=self.timestamp,
-            user_sid=self.user_sid,
-            user_name=self.user_name,
-            user_display_name=self.user_display_name,
-            user_ip=self.user_ip,
-            sys_name=self.sys_name,
-            sys_version=self.sys_version,
-
-        )
-
-    def get_user_sid(self):
-        return get_activity_user_sid(
-            user_sid=self.user_sid
-        )
-
-    def get_user_ip(self):
-        return get_activity_user_ip(
-            user_ip=self.user_ip
-        )
-
-    def get_sys_name(self):
-        return get_activity_sys_name(
-            sys_name=self.sys_name
-        )
+SessionDep = Annotated[Session, Depends(get_session)]
 
 
 @app.middleware("http")
@@ -64,27 +55,66 @@ async def log_permit_requests(request: Request, call_next):
     return response
 
 
-@app.post("/api/v1/activities/")
-async def save_user_login(item: Activity):
-    if item.save():
-        return {"status": "success"}
-    else:
-        return {"status": "error"}
+@app.post("/api/v1/activity/")
+def save_user_activity(activity: Activity, session: SessionDep):
+    try:
+        session.add(activity)
+        session.commit()
+        session.refresh(activity)
+        logging.info(f"Activity saved: {activity}")
+        return {"status": "success", "activity": activity}
+    except sqlalchemy.exc.IntegrityError as err:
+        logging.error(f"Error: {err}")
+        return {"status": "error", "activity": activity}
 
 
-@app.get("/api/v1/activities/user_sid/{user_sid}/")
-async def get_user_sid(user_sid):
-    return get_activity_user_sid(user_sid=user_sid)
+@app.get("/api/v1/activity/user_sid/{user_sid}/")
+def read_activity_by_sid(user_sid: str, session: SessionDep):
+    statement = select(Activity).where(Activity.user_sid == user_sid)
+    activity = session.exec(statement).all()
+    logging.info(f"Activity by SID: {activity}")
+    if not activity:
+        logging.error(f"SID not found: {user_sid}")
+        raise HTTPException(status_code=404, detail="SID not found")
+    return activity
 
 
-@app.get("/api/v1/activities/user_ip/{user_ip}/")
-async def get_user_ip(user_ip: str):
-    return get_activity_user_ip(user_ip=user_ip)
+@app.get("/api/v1/activity/user_name/{user_name}/")
+def read_activity_by_user_name(user_name: str, session: SessionDep):
+    statement = select(Activity).where(Activity.user_name == user_name)
+    activity = session.exec(statement).all()
+    logging.info(f"Activity by user_name: {activity}")
+    if not activity:
+        logging.error(f"user_name not found: {user_name}")
+        raise HTTPException(status_code=404, detail="user_name not found")
+    return activity
 
 
-@app.get("/api/v1/activities/sys_name/{sys_name}/")
-async def get_sys_name(sys_name):
-    return get_activity_sys_name(sys_name=sys_name)
+@app.get("/api/v1/activity/user_ip/{user_ip}/")
+def read_activity_by_user_ip(user_ip: str, session: SessionDep):
+    statement = select(Activity).where(Activity.user_ip == user_ip)
+    activity = session.exec(statement).all()
+    logging.info(f"Activity by user_ip: {activity}")
+    if not activity:
+        logging.error(f"user_ip not found: {user_ip}")
+        raise HTTPException(status_code=404, detail="user_ip not found")
+    return activity
+
+
+@app.get("/api/v1/activity/sys_name/{sys_name}/")
+def read_activity_by_sys_name(request: Request,
+                              sys_name: str,
+                              session: SessionDep,
+                              offset: int = 0,
+                              limit: Annotated[int, Query(le=100)] = 100):
+    statement = select(Activity).where(Activity.sys_name == sys_name).offset(offset).limit(limit).order_by(Activity.id)
+    activity = session.exec(statement).all()
+    logging.info(f"{request.client.host} Select activity by sys_name: {sys_name}, count:{len(activity)}")
+    if not activity:
+        logging.error(f"sys_name not found: {sys_name}")
+        raise HTTPException(status_code=404, detail="sys_name not found")
+    return activity
+
 
 
 if __name__ == "__main__":
